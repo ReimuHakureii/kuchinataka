@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "tls", "blocking"]}
+eframe = "0.27"
+egui = "0.27"
+scraper = "0.14"
+url = "2.4"

@@ -1,0 +1,13 @@
+# --- Rust Build Files --- #
+/website_scraper/target/
+/website_scraper/Cargo.lock
+
+# --- Build Artifacts --- #
+*.exe
+*.dll
+*.dylib
+*.so
+*.pdb
+
+# --- IDE Stuff --- #
+.vscode/
