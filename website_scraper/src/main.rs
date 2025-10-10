@@ -1,7 +1,7 @@
 #![allow(unused_imports)] // Suppress unused-imports warnings
 
 use eframe::{App, Frame, NativeOptions};
-use eframe::egui::{CentralPanel, ScrollArea, vec2, Slider, TextEdit, TopBottomPanel, Visuals, Color32, ProgressBar, Ui, RichText, Label, Style};
+use eframe::egui::{CentralPanel, ScrollArea, vec2, Slider, TextEdit, TopBottomPanel, Visuals, Color32, ProgressBar, Ui, RichText, Label, Style, ComboBox};
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use url::Url;
@@ -43,6 +43,7 @@ struct ScraperConfig {
     content_type: String,
     retry_attempts: f32,
     scrape_delay: f32,
+    use_headless: bool,
 }
 
 struct ScraperApp {
@@ -59,6 +60,7 @@ struct ScraperApp {
     content_type: String,
     retry_attempts: f32,
     scrape_delay: f32,
+    use_headless: bool, // New: Toggle for headless mode
     results: Arc<Mutex<Vec<ScrapedData>>>,
     status: String,
     log: Arc<Mutex<Vec<String>>>,
@@ -67,14 +69,14 @@ struct ScraperApp {
     tx: Sender<String>,
     rx: Receiver<String>,
     dark_mode: bool,
-    last_max_concurrent: f32, // Track last configured thread count
+    last_max_concurrent: f32,
 }
 
 impl ScraperApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         // Initialize Rayon thread pool once
         rayon::ThreadPoolBuilder::new()
-            .num_threads(4) // Default to 4 threads
+            .num_threads(4)
             .build_global()
             .unwrap_or_else(|e| eprintln!("Failed to initialize thread pool: {}", e));
 
@@ -93,6 +95,7 @@ impl ScraperApp {
             content_type: "text".to_string(),
             retry_attempts: 2.0,
             scrape_delay: 1.0,
+            use_headless: true,
             results: Arc::new(Mutex::new(Vec::new())),
             status: "Ready to scrape".to_string(),
             log: Arc::new(Mutex::new(Vec::new())),
@@ -101,7 +104,7 @@ impl ScraperApp {
             tx,
             rx,
             dark_mode: true,
-            last_max_concurrent: 4.0, // Initialize to match default max_concurrent
+            last_max_concurrent: 4.0,
         }
     }
 
@@ -121,132 +124,104 @@ impl ScraperApp {
         regex: &Option<Regex>,
         use_headless: bool,
         content_type: &str,
-        retry_attempts: u32,
     ) -> Result<ScrapedData, String> {
         let normalized_url = Self::normalize_url(url);
         let parsed_url = Url::parse(&normalized_url).map_err(|e| format!("Invalid URL {}: {}", normalized_url, e))?;
 
-        // Retry logic
-        let mut attempts = 0;
-        let max_attempts = retry_attempts + 1;
-        let mut last_error = String::new();
+        let html = if use_headless {
+            let launch_options = LaunchOptions::default_builder()
+                .headless(true)
+                .build()
+                .map_err(|e| format!("Failed to build launch options: {}", e.to_string()))?;
+            let browser = Browser::new(launch_options)
+                .map_err(|e| format!("Failed to start headless browser: {}", e.to_string()))?;
+            let tab = browser.new_tab()
+                .map_err(|e| format!("Failed to create tab: {}", e.to_string()))?;
+            tab.navigate_to(&normalized_url)
+                .map_err(|e| format!("Failed to navigate to {}: {}", normalized_url, e.to_string()))?;
+            tab.wait_until_navigated()
+                .map_err(|e| format!("Navigation failed for {}: {}", normalized_url, e.to_string()))?;
+            tab.get_content()
+                .map_err(|e| format!("Failed to get content for {}: {}", normalized_url, e.to_string()))
+        } else {
+            client
+                .get(parsed_url.as_str())
+                .send()
+                .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?
+                .text()
+                .map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))
+        }?;
 
-        while attempts < max_attempts {
-            attempts += 1;
-            let result = if use_headless {
-                let launch_options = LaunchOptions::default_builder()
-                    .headless(true)
-                    .build()
-                    .map_err(|e| format!("Failed to build launch options: {}", e.to_string()))?;
-                let browser = Browser::new(launch_options)
-                    .map_err(|e| format!("Failed to start headless browser: {}", e.to_string()))?;
-                let tab = browser.new_tab()
-                    .map_err(|e| format!("Failed to create tab: {}", e.to_string()))?;
-                tab.navigate_to(&normalized_url)
-                    .map_err(|e| format!("Failed to navigate to {}: {}", normalized_url, e.to_string()))?;
-                tab.wait_until_navigated()
-                    .map_err(|e| format!("Navigation failed for {}: {}", normalized_url, e.to_string()))?;
-                tab.get_content()
-                    .map_err(|e| format!("Failed to get content for {}: {}", normalized_url, e.to_string()))
+        // Parse HTML
+        let document = Html::parse_document(&html);
+        let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector {}: {:?}", selector, e))?;
+        let elements: Vec<_> = document.select(&selector).collect();
+
+        if elements.is_empty() {
+            return Err(format!("No elements found for selector '{}' on {}", selector, normalized_url));
+        }
+
+        let mut content = String::new();
+        let mut attributes = String::new();
+
+        match content_type.to_lowercase().as_str() {
+            "text" => {
+                content = elements
+                    .iter()
+                    .map(|element| element.text().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            "links" => {
+                content = elements
+                    .iter()
+                    .filter_map(|element| element.value().attr("href"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            "images" => {
+                content = elements
+                    .iter()
+                    .filter_map(|element| element.value().attr("src"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            _ => return Err(format!("Invalid content type: {}", content_type)),
+        }
+
+        // Apply regex filtering
+        if let Some(regex) = regex {
+            let matches = regex
+                .find_iter(&content)
+                .map(|m| m.as_str().to_string())
+                .collect::<Vec<_>>();
+            content = if matches.is_empty() {
+                return Err(format!("No regex matches found for {} on {}", regex, normalized_url));
             } else {
-                client
-                    .get(parsed_url.as_str())
-                    .send()
-                    .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?
-                    .text()
-                    .map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))
+                matches.join("\n")
             };
+        }
 
-            match result {
-                Ok(html) => {
-                    // Parse HTML
-                    let document = Html::parse_document(&html);
-                    let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector: {:?}", e))?;
-
-                    // Extract content based on type
-                    let mut content = String::new();
-                    let mut attributes = String::new();
-
-                    match content_type.to_lowercase().as_str() {
-                        "text" => {
-                            content = document
-                                .select(&selector)
-                                .map(|element| element.text().collect::<Vec<_>>().join(" "))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                        }
-                        "links" => {
-                            if let Some(attr) = attribute {
-                                if attr != "href" {
-                                    return Err("Links content type requires 'href' attribute".to_string());
-                                }
-                                content = document
-                                    .select(&selector)
-                                    .filter_map(|element| element.value().attr("href"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                            }
-                        }
-                        "images" => {
-                            if let Some(attr) = attribute {
-                                if attr != "src" {
-                                    return Err("Images content type requires 'src' attribute".to_string());
-                                }
-                                content = document
-                                    .select(&selector)
-                                    .filter_map(|element| element.value().attr("src"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                            }
-                        }
-                        _ => return Err("Invalid content type".to_string()),
-                    }
-
-                    // Apply regex filtering
-                    if let Some(regex) = regex {
-                        let matches = regex
-                            .find_iter(&content)
-                            .map(|m| m.as_str().to_string())
-                            .collect::<Vec<_>>();
-                        content = if matches.is_empty() {
-                            return Err(format!("No regex matches found for {}", normalized_url));
-                        } else {
-                            matches.join("\n")
-                        };
-                    }
-
-                    // Extract attributes if not already handled
-                    if let Some(attr) = attribute {
-                        if content_type != "links" && content_type != "images" {
-                            attributes = document
-                                .select(&selector)
-                                .filter_map(|element| element.value().attr(attr))
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                        }
-                    }
-
-                    if content.is_empty() && attributes.is_empty() {
-                        return Err(format!("No content or attributes found for {}", normalized_url));
-                    }
-
-                    return Ok(ScrapedData {
-                        url: normalized_url,
-                        content,
-                        attributes,
-                    });
-                }
-                Err(e) => {
-                    last_error = e;
-                    if attempts < max_attempts {
-                        std::thread::sleep(Duration::from_millis(1000));
-                        continue;
-                    }
-                }
+        // Extract additional attributes for text content type
+        if content_type == "text" {
+            if let Some(attr) = attribute {
+                attributes = elements
+                    .iter()
+                    .filter_map(|element| element.value().attr(attr))
+                    .collect::<Vec<_>>()
+                    .join("\n");
             }
         }
 
-        Err(format!("Failed after {} attempts: {}", max_attempts, last_error))
+        if content.is_empty() {
+            return Err(format!("No content extracted for {} on {}", content_type, normalized_url));
+        }
+
+        Ok(ScrapedData {
+            url: normalized_url,
+            content,
+            attributes,
+        })
     }
 
     fn save_to_csv(&self, filename: &str) -> Result<(), String> {
@@ -310,6 +285,7 @@ impl ScraperApp {
             content_type: self.content_type.clone(),
             retry_attempts: self.retry_attempts,
             scrape_delay: self.scrape_delay,
+            use_headless: self.use_headless,
         };
         let json = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
@@ -334,6 +310,7 @@ impl ScraperApp {
         self.content_type = config.content_type;
         self.retry_attempts = config.retry_attempts;
         self.scrape_delay = config.scrape_delay;
+        self.use_headless = config.use_headless;
         Ok(())
     }
 
@@ -460,14 +437,35 @@ impl App for ScraperApp {
             // Scraping settings
             ui.collapsing("Scraping Settings", |ui| {
                 ui.horizontal(|ui| {
+                    ui.label("Content Type: ");
+                    ComboBox::from_label("")
+                        .selected_text(&self.content_type)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_value(&mut self.content_type, "text".to_string(), "Text").clicked() {
+                                self.selector_input = "p, h1, h2, h3".to_string();
+                                self.attribute_input = "".to_string();
+                            }
+                            if ui.selectable_value(&mut self.content_type, "links".to_string(), "Links").clicked() {
+                                self.selector_input = "a".to_string();
+                                self.attribute_input = "href".to_string();
+                            }
+                            if ui.selectable_value(&mut self.content_type, "images".to_string(), "Images").clicked() {
+                                self.selector_input = "img".to_string();
+                                self.attribute_input = "src".to_string();
+                            }
+                        })
+                        .response
+                        .on_hover_text("Select content type: text, links, or images");
+                });
+                ui.horizontal(|ui| {
                     ui.label("CSS Selector: ");
                     ui.text_edit_singleline(&mut self.selector_input)
-                        .on_hover_text("e.g., p, h1, div.my-class");
+                        .on_hover_text("e.g., p, h1, div.my-class for text; a for links; img for images");
                 });
                 ui.horizontal(|ui| {
                     ui.label("HTML Attribute: ");
                     ui.text_edit_singleline(&mut self.attribute_input)
-                        .on_hover_text("e.g., href, src, leave blank for none");
+                        .on_hover_text("e.g., href for links, src for images, leave blank for text");
                 });
                 ui.horizontal(|ui| {
                     ui.label("Regex Filter: ");
@@ -478,11 +476,6 @@ impl App for ScraperApp {
                     ui.label("Next Page Selector: ");
                     ui.text_edit_singleline(&mut self.next_page_selector)
                         .on_hover_text("e.g., a.next, leave blank for none");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Content Type: ");
-                    ui.text_edit_singleline(&mut self.content_type)
-                        .on_hover_text("text, links, or images");
                 });
                 ui.horizontal(|ui| {
                     ui.label("Crawl Depth: ");
@@ -517,6 +510,11 @@ impl App for ScraperApp {
                 ui.horizontal(|ui| {
                     ui.label("Request Timeout (seconds): ");
                     ui.add(Slider::new(&mut self.timeout_secs, 1.0..=30.0).step_by(1.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Use Headless Browser: ");
+                    ui.checkbox(&mut self.use_headless, "Enable")
+                        .on_hover_text("Enable for JavaScript-heavy sites, disable for faster HTTP requests");
                 });
             });
 
@@ -560,7 +558,7 @@ impl App for ScraperApp {
                     let proxy = self.proxy.clone();
                     let retry_attempts = self.retry_attempts as u32;
                     let scrape_delay = self.scrape_delay;
-                    let use_headless = true;
+                    let use_headless = self.use_headless;
 
                     if urls.is_empty() {
                         self.status = "No valid URLs provided".to_string();
@@ -616,7 +614,7 @@ impl App for ScraperApp {
                                 }
 
                                 // Scrape current URL
-                                match Self::scrape_url(&current_url, &client, &selector, &attribute, &regex, use_headless, &content_type, retry_attempts) {
+                                match Self::scrape_url(&current_url, &client, &selector, &attribute, &regex, use_headless, &content_type) {
                                     Ok(data) => {
                                         scraped_results.push(data);
                                         let msg = format!("Scraped {}", current_url);
