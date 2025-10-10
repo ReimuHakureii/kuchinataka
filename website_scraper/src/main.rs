@@ -16,17 +16,26 @@ use std::path::Path;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::time::Duration;
+use regex::Regex;
+use headless_chrome::{Browser, browser::LaunchOptions};
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Serialize)]
 struct ScrapedData {
     url: String,
     content: String,
+    attributes: String,
 }
 
 struct ScraperApp {
     url_input: String,
     selector_input: String,
+    attribute_input: String,
+    regex_input: String,
     timeout_secs: f32,
+    crawl_depth: f32,
+    next_page_selector: String,
+    custom_headers: String,
     results: Arc<Mutex<Vec<ScrapedData>>>,
     status: String,
     log: Arc<Mutex<Vec<String>>>,
@@ -38,11 +47,16 @@ struct ScraperApp {
 
 impl ScraperApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let (tx, rx) = bounded(100); // Channel for status updates
+        let (tx, rx) = bounded(100);
         Self {
             url_input: String::new(),
-            selector_input: "p, h1, h2, h3".to_string(), // Default selector
-            timeout_secs: 10.0, // Default timeout: 10 seconds
+            selector_input: "p, h1, h2, h3".to_string(),
+            attribute_input: "".to_string(),
+            regex_input: "".to_string(),
+            timeout_secs: 10.0,
+            crawl_depth: 1.0,
+            next_page_selector: "".to_string(),
+            custom_headers: "".to_string(),
             results: Arc::new(Mutex::new(Vec::new())),
             status: "Ready to scrape".to_string(),
             log: Arc::new(Mutex::new(Vec::new())),
@@ -61,35 +75,84 @@ impl ScraperApp {
         }
     }
 
-    fn scrape_url(url: &str, client: &Client, selector: &str) -> Result<ScrapedData, String> {
+    fn scrape_url(
+        url: &str,
+        client: &Client,
+        selector: &str,
+        attribute: &Option<String>,
+        regex: &Option<Regex>,
+        use_headless: bool,
+    ) -> Result<ScrapedData, String> {
         let normalized_url = Self::normalize_url(url);
         let parsed_url = Url::parse(&normalized_url).map_err(|e| format!("Invalid URL {}: {}", normalized_url, e))?;
 
-        let response = client
-            .get(parsed_url.as_str())
-            .send()
-            .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?;
-        
-        let text = response
-            .text()
-            .map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))?;
+        // Fetch HTML
+        let html = if use_headless {
+            let launch_options = LaunchOptions::default_builder()
+                .headless(true)
+                .build()
+                .map_err(|e| format!("Failed to build launch options: {}", e.to_string()))?;
+            let browser = Browser::new(launch_options)
+                .map_err(|e| format!("Failed to start headless browser: {}", e.to_string()))?;
+            let tab = browser.new_tab()
+                .map_err(|e| format!("Failed to create tab: {}", e.to_string()))?;
+            tab.navigate_to(&normalized_url)
+                .map_err(|e| format!("Failed to navigate to {}: {}", normalized_url, e.to_string()))?;
+            tab.wait_until_navigated()
+                .map_err(|e| format!("Navigation failed for {}: {}", normalized_url, e.to_string()))?;
+            tab.get_content()
+                .map_err(|e| format!("Failed to get content for {}: {}", normalized_url, e.to_string()))?
+        } else {
+            let response = client
+                .get(parsed_url.as_str())
+                .send()
+                .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?;
+            response.text().map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))?
+        };
 
-        let document = Html::parse_document(&text);
-        let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector '{}': {:?}", selector, e))?;
+        // Parse HTML
+        let document = Html::parse_document(&html);
+        let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector: {:?}", e))?;
 
-        let content = document
+        // Extract text content
+        let mut content = document
             .select(&selector)
             .map(|element| element.text().collect::<Vec<_>>().join(" "))
             .collect::<Vec<_>>()
             .join("\n");
 
-        if content.is_empty() {
-            return Err(format!("No content found for {} with selector '{}'", normalized_url, selector));
+        // Apply regex filtering
+        if let Some(regex) = regex {
+            let matches = regex
+                .find_iter(&content)
+                .map(|m| m.as_str().to_string())
+                .collect::<Vec<_>>();
+            content = if matches.is_empty() {
+                return Err(format!("No regex matches found for {}", normalized_url));
+            } else {
+                matches.join("\n")
+            };
+        }
+
+        // Extract attributes
+        let attributes = if let Some(attr) = attribute {
+            document
+                .select(&selector)
+                .filter_map(|element| element.value().attr(attr))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            "".to_string()
+        };
+
+        if content.is_empty() && attributes.is_empty() {
+            return Err(format!("No content or attributes found for {}", normalized_url));
         }
 
         Ok(ScrapedData {
             url: normalized_url,
             content,
+            attributes,
         })
     }
 
@@ -126,16 +189,30 @@ impl ScraperApp {
             Ok(urls)
         }
     }
+
+    fn parse_headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for line in self.custom_headers.lines() {
+            let parts: Vec<&str> = line.splitn(2, ':').map(|s| s.trim()).collect();
+            if parts.len() == 2 {
+                if let Ok(name) = reqwest::header::HeaderName::from_bytes(parts[0].as_bytes()) {
+                    if let Ok(value) = reqwest::header::HeaderValue::from_str(parts[1]) {
+                        headers.insert(name, value);
+                    }
+                }
+            }
+        }
+        headers
+    }
 }
 
 impl App for ScraperApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut Frame) {
-        // Check for status updates
         while let Ok(status) = self.rx.try_recv() {
             self.status = status.clone();
             let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
             self.log.lock().unwrap().push(format!("[{}] {}", timestamp, status));
-            println!("Status: {}", self.status); // Log to console
+            println!("Status: {}", self.status);
             ctx.request_repaint();
         }
 
@@ -177,6 +254,36 @@ impl App for ScraperApp {
                 ui.text_edit_singleline(&mut self.selector_input);
             });
 
+            // Attribute input
+            ui.horizontal(|ui| {
+                ui.label("HTML Attribute (e.g., href, src, leave blank for none): ");
+                ui.text_edit_singleline(&mut self.attribute_input);
+            });
+
+            // Regex input
+            ui.horizontal(|ui| {
+                ui.label("Regex Filter (e.g., [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}, leave blank for none): ");
+                ui.text_edit_singleline(&mut self.regex_input);
+            });
+
+            // Next page selector
+            ui.horizontal(|ui| {
+                ui.label("Next Page Selector (e.g., a.next, leave blank for none): ");
+                ui.text_edit_singleline(&mut self.next_page_selector);
+            });
+
+            // Crawl depth
+            ui.horizontal(|ui| {
+                ui.label("Crawl Depth (0 = no crawling): ");
+                ui.add(Slider::new(&mut self.crawl_depth, 0.0..=5.0).step_by(1.0));
+            });
+
+            // Custom headers
+            ui.horizontal(|ui| {
+                ui.label("Custom Headers (key:value, one per line, e.g., Cookie: key=value): ");
+                ui.add(TextEdit::multiline(&mut self.custom_headers).desired_rows(3));
+            });
+
             // Timeout slider
             ui.horizontal(|ui| {
                 ui.label("Request Timeout (seconds): ");
@@ -193,7 +300,21 @@ impl App for ScraperApp {
                         .filter(|s| !s.is_empty())
                         .collect();
                     let selector = self.selector_input.clone();
+                    let attribute = if self.attribute_input.is_empty() {
+                        None
+                    } else {
+                        Some(self.attribute_input.clone())
+                    };
+                    let regex = if self.regex_input.is_empty() {
+                        None
+                    } else {
+                        Regex::new(&self.regex_input).ok()
+                    };
+                    let next_page_selector = self.next_page_selector.clone();
+                    let depth = self.crawl_depth as u32;
+                    let headers = self.parse_headers();
                     let timeout = Duration::from_secs_f32(self.timeout_secs);
+                    let use_headless = true;
 
                     if urls.is_empty() {
                         self.status = "No valid URLs provided".to_string();
@@ -206,7 +327,16 @@ impl App for ScraperApp {
                         let progress = Arc::clone(&self.progress);
                         let total_urls = Arc::clone(&self.total_urls);
                         let tx = self.tx.clone();
-                        *total_urls.lock().unwrap() = urls.len();
+
+                        // Crawl URLs with depth
+                        let mut all_urls = HashSet::new();
+                        let mut queue = VecDeque::new();
+                        for url in urls {
+                            let normalized = Self::normalize_url(&url);
+                            all_urls.insert(normalized.clone());
+                            queue.push_back((normalized, 0));
+                        }
+                        *total_urls.lock().unwrap() = all_urls.len().min(100);
                         *progress.lock().unwrap() = 0.0;
                         tx.send("Scraping...".to_string()).unwrap();
                         ctx.request_repaint();
@@ -216,28 +346,76 @@ impl App for ScraperApp {
                             let client = Client::builder()
                                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
                                 .timeout(timeout)
+                                .default_headers(headers)
                                 .build()
                                 .expect("Failed to build HTTP client");
-                            let scraped_results: Vec<_> = urls
-                                .par_iter()
-                                .enumerate()
-                                .map(|(i, url)| {
-                                    let result = Self::scrape_url(url, &client, &selector);
-                                    let msg = match &result {
-                                        Ok(data) => format!("Scraped {}", url),
-                                        Err(e) => format!("Error scraping {}: {}", url, e),
-                                    };
-                                    println!("{}", msg);
-                                    log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg));
-                                    *progress.lock().unwrap() = (i + 1) as f32 / urls.len() as f32;
-                                    tx.send(msg).unwrap();
-                                    result.ok()
-                                })
-                                .filter_map(|x| x)
-                                .collect();
+
+                            let mut scraped_results = Vec::new();
+                            let mut processed = 0;
+
+                            while let Some((current_url, current_depth)) = queue.pop_front() {
+                                if current_depth > depth || all_urls.len() >= 100 {
+                                    continue;
+                                }
+
+                                // Scrape current URL
+                                match Self::scrape_url(&current_url, &client, &selector, &attribute, &regex, use_headless) {
+                                    Ok(data) => {
+                                        scraped_results.push(data);
+                                        let msg = format!("Scraped {}", current_url);
+                                        println!("{}", msg);
+                                        log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg));
+                                        tx.send(msg).unwrap();
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("Error scraping {}: {}", current_url, e);
+                                        println!("{}", msg);
+                                        log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), msg));
+                                        tx.send(msg).unwrap();
+                                    }
+                                }
+
+                                // Update progress
+                                processed += 1;
+                                *progress.lock().unwrap() = processed as f32 / *total_urls.lock().unwrap() as f32;
+
+                                // Follow next page or crawl links
+                                if !next_page_selector.is_empty() || current_depth < depth {
+                                    if let Ok(html) = client.get(&current_url).send().and_then(|r| r.text()) {
+                                        let document = Html::parse_document(&html);
+                                        let base_url = Url::parse(&current_url).unwrap();
+                                        let link_selector = if !next_page_selector.is_empty() {
+                                            Selector::parse(&next_page_selector).unwrap_or_else(|_| Selector::parse("a").unwrap())
+                                        } else {
+                                            Selector::parse("a").unwrap()
+                                        };
+                                        for element in document.select(&link_selector) {
+                                            if let Some(href) = element.value().attr("href") {
+                                                if let Ok(absolute_url) = base_url.join(href) {
+                                                    let url_str = absolute_url.to_string();
+                                                    if !all_urls.contains(&url_str) && current_depth < depth {
+                                                        all_urls.insert(url_str.clone());
+                                                        queue.push_back((url_str, current_depth + 1));
+                                                        *total_urls.lock().unwrap() = all_urls.len().min(100);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Deduplicate results
+                            let mut unique_results = Vec::new();
+                            let mut seen_content = HashSet::new();
+                            for data in scraped_results {
+                                if seen_content.insert(data.content.clone()) {
+                                    unique_results.push(data);
+                                }
+                            }
 
                             let mut results_lock = results.lock().unwrap();
-                            *results_lock = scraped_results;
+                            *results_lock = unique_results;
                             let msg = if results_lock.is_empty() {
                                 "No successful results".to_string()
                             } else {
@@ -255,8 +433,8 @@ impl App for ScraperApp {
                     self.results.lock().unwrap().clear();
                     self.log.lock().unwrap().clear();
                     self.status = "Results cleared".to_string();
-                    self.progress.lock().unwrap() = 0.0;
-                    self.total_urls.lock().unwrap() = 0;
+                    *self.progress.lock().unwrap() = 0.0;
+                    *self.total_urls.lock().unwrap() = 0;
                     println!("Status: {}", self.status);
                     ctx.request_repaint();
                 }
@@ -302,6 +480,9 @@ impl App for ScraperApp {
                 for data in results.iter() {
                     ui.label(format!("URL: {}", data.url));
                     ui.label(format!("Content: {}", data.content));
+                    if !data.attributes.is_empty() {
+                        ui.label(format!("Attributes: {}", data.attributes));
+                    }
                     ui.separator();
                 }
             });
