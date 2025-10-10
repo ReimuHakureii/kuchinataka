@@ -67,7 +67,7 @@ struct ScraperApp {
     tx: Sender<String>,
     rx: Receiver<String>,
     dark_mode: bool,
-    last_max_concurrent: f32, // New: Track last configured thread count
+    last_max_concurrent: f32, // Track last configured thread count
 }
 
 impl ScraperApp {
@@ -558,7 +558,6 @@ impl App for ScraperApp {
                     let headers = self.parse_headers();
                     let timeout = Duration::from_secs_f32(self.timeout_secs);
                     let proxy = self.proxy.clone();
-                    let max_concurrent = self.max_concurrent as usize;
                     let retry_attempts = self.retry_attempts as u32;
                     let scrape_delay = self.scrape_delay;
                     let use_headless = true;
