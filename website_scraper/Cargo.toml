@@ -4,8 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["json", "gzip", "brotli", "tls", "blocking"]}
-eframe = "0.27"
-egui = "0.27"
-scraper = "0.14"
+reqwest = { version = "0.11", features = ["gzip", "blocking"]}
+eframe = "0.22"
+egui = "0.22"
+scraper = "0.13"
 url = "2.4"
+serde = { version = "1.0", features = ["derive"]}
+csv = "1.1"
+rayon = "1.7"
+crossbeam-channel = "0.5"
+winapi = { version = "0.3.9", features = ["winuser", "windef"]}
+rfd = "0.11"
+chrono = "0.4"
