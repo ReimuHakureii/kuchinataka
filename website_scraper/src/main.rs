@@ -60,7 +60,7 @@ struct ScraperApp {
     content_type: String,
     retry_attempts: f32,
     scrape_delay: f32,
-    use_headless: bool, // New: Toggle for headless mode
+    use_headless: bool,
     results: Arc<Mutex<Vec<ScrapedData>>>,
     status: String,
     log: Arc<Mutex<Vec<String>>>,
@@ -154,14 +154,14 @@ impl ScraperApp {
 
         // Parse HTML
         let document = Html::parse_document(&html);
-        let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector {}: {:?}", selector, e))?;
-        let elements: Vec<_> = document.select(&selector).collect();
+        let selector_obj = Selector::parse(selector).map_err(|e| format!("Invalid selector {}: {:?}", selector, e))?;
+        let elements: Vec<_> = document.select(&selector_obj).collect();
 
         if elements.is_empty() {
             return Err(format!("No elements found for selector '{}' on {}", selector, normalized_url));
         }
 
-        let mut content = String::new();
+        let mut content;
         let mut attributes = String::new();
 
         match content_type.to_lowercase().as_str() {
@@ -556,7 +556,6 @@ impl App for ScraperApp {
                     let headers = self.parse_headers();
                     let timeout = Duration::from_secs_f32(self.timeout_secs);
                     let proxy = self.proxy.clone();
-                    let retry_attempts = self.retry_attempts as u32;
                     let scrape_delay = self.scrape_delay;
                     let use_headless = self.use_headless;
 
