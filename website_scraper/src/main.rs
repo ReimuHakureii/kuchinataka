@@ -1,11 +1,12 @@
 #![allow(unused_imports)] // Suppress unused-imports warnings
 
 use eframe::{App, Frame, NativeOptions};
-use eframe::egui::{CentralPanel, ScrollArea, vec2, Slider, TextEdit};
+use eframe::egui::{CentralPanel, ScrollArea, vec2, Slider, TextEdit, TopBottomPanel, Visuals, Color32, ProgressBar, Ui, RichText, Label, Style};
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use url::Url;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use serde_json;
 use csv::Writer;
 use rayon::prelude::*;
 use crossbeam_channel::{bounded, Sender, Receiver};
@@ -13,18 +14,35 @@ use rfd::FileDialog;
 use chrono::Local;
 use std::sync::{Arc, Mutex};
 use std::path::Path;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::fs::{File, self};
+use std::io::{self, BufRead, BufReader, Write};
 use std::time::Duration;
 use regex::Regex;
 use headless_chrome::{Browser, browser::LaunchOptions};
 use std::collections::{HashSet, VecDeque};
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ScrapedData {
     url: String,
     content: String,
     attributes: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ScraperConfig {
+    url_input: String,
+    selector_input: String,
+    attribute_input: String,
+    regex_input: String,
+    timeout_secs: f32,
+    crawl_depth: f32,
+    next_page_selector: String,
+    custom_headers: String,
+    proxy: String,
+    max_concurrent: f32,
+    content_type: String,
+    retry_attempts: f32,
+    scrape_delay: f32,
 }
 
 struct ScraperApp {
@@ -36,6 +54,11 @@ struct ScraperApp {
     crawl_depth: f32,
     next_page_selector: String,
     custom_headers: String,
+    proxy: String,
+    max_concurrent: f32,
+    content_type: String,
+    retry_attempts: f32,
+    scrape_delay: f32,
     results: Arc<Mutex<Vec<ScrapedData>>>,
     status: String,
     log: Arc<Mutex<Vec<String>>>,
@@ -43,6 +66,7 @@ struct ScraperApp {
     total_urls: Arc<Mutex<usize>>,
     tx: Sender<String>,
     rx: Receiver<String>,
+    dark_mode: bool,
 }
 
 impl ScraperApp {
@@ -57,6 +81,11 @@ impl ScraperApp {
             crawl_depth: 1.0,
             next_page_selector: "".to_string(),
             custom_headers: "".to_string(),
+            proxy: "".to_string(),
+            max_concurrent: 4.0,
+            content_type: "text".to_string(),
+            retry_attempts: 2.0,
+            scrape_delay: 1.0,
             results: Arc::new(Mutex::new(Vec::new())),
             status: "Ready to scrape".to_string(),
             log: Arc::new(Mutex::new(Vec::new())),
@@ -64,6 +93,7 @@ impl ScraperApp {
             total_urls: Arc::new(Mutex::new(0)),
             tx,
             rx,
+            dark_mode: true,
         }
     }
 
@@ -82,78 +112,133 @@ impl ScraperApp {
         attribute: &Option<String>,
         regex: &Option<Regex>,
         use_headless: bool,
+        content_type: &str,
+        retry_attempts: u32,
     ) -> Result<ScrapedData, String> {
         let normalized_url = Self::normalize_url(url);
         let parsed_url = Url::parse(&normalized_url).map_err(|e| format!("Invalid URL {}: {}", normalized_url, e))?;
 
-        // Fetch HTML
-        let html = if use_headless {
-            let launch_options = LaunchOptions::default_builder()
-                .headless(true)
-                .build()
-                .map_err(|e| format!("Failed to build launch options: {}", e.to_string()))?;
-            let browser = Browser::new(launch_options)
-                .map_err(|e| format!("Failed to start headless browser: {}", e.to_string()))?;
-            let tab = browser.new_tab()
-                .map_err(|e| format!("Failed to create tab: {}", e.to_string()))?;
-            tab.navigate_to(&normalized_url)
-                .map_err(|e| format!("Failed to navigate to {}: {}", normalized_url, e.to_string()))?;
-            tab.wait_until_navigated()
-                .map_err(|e| format!("Navigation failed for {}: {}", normalized_url, e.to_string()))?;
-            tab.get_content()
-                .map_err(|e| format!("Failed to get content for {}: {}", normalized_url, e.to_string()))?
-        } else {
-            let response = client
-                .get(parsed_url.as_str())
-                .send()
-                .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?;
-            response.text().map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))?
-        };
+        // Retry logic
+        let mut attempts = 0;
+        let max_attempts = retry_attempts + 1;
+        let mut last_error = String::new();
 
-        // Parse HTML
-        let document = Html::parse_document(&html);
-        let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector: {:?}", e))?;
-
-        // Extract text content
-        let mut content = document
-            .select(&selector)
-            .map(|element| element.text().collect::<Vec<_>>().join(" "))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Apply regex filtering
-        if let Some(regex) = regex {
-            let matches = regex
-                .find_iter(&content)
-                .map(|m| m.as_str().to_string())
-                .collect::<Vec<_>>();
-            content = if matches.is_empty() {
-                return Err(format!("No regex matches found for {}", normalized_url));
+        while attempts < max_attempts {
+            attempts += 1;
+            let result = if use_headless {
+                let launch_options = LaunchOptions::default_builder()
+                    .headless(true)
+                    .build()
+                    .map_err(|e| format!("Failed to build launch options: {}", e.to_string()))?;
+                let browser = Browser::new(launch_options)
+                    .map_err(|e| format!("Failed to start headless browser: {}", e.to_string()))?;
+                let tab = browser.new_tab()
+                    .map_err(|e| format!("Failed to create tab: {}", e.to_string()))?;
+                tab.navigate_to(&normalized_url)
+                    .map_err(|e| format!("Failed to navigate to {}: {}", normalized_url, e.to_string()))?;
+                tab.wait_until_navigated()
+                    .map_err(|e| format!("Navigation failed for {}: {}", normalized_url, e.to_string()))?;
+                tab.get_content()
+                    .map_err(|e| format!("Failed to get content for {}: {}", normalized_url, e.to_string()))
             } else {
-                matches.join("\n")
+                client
+                    .get(parsed_url.as_str())
+                    .send()
+                    .map_err(|e| format!("Failed to fetch {}: {}", normalized_url, e))?
+                    .text()
+                    .map_err(|e| format!("Failed to read response from {}: {}", normalized_url, e))
             };
+
+            match result {
+                Ok(html) => {
+                    // Parse HTML
+                    let document = Html::parse_document(&html);
+                    let selector = Selector::parse(selector).map_err(|e| format!("Invalid selector: {:?}", e))?;
+
+                    // Extract content based on type
+                    let mut content = String::new();
+                    let mut attributes = String::new();
+
+                    match content_type.to_lowercase().as_str() {
+                        "text" => {
+                            content = document
+                                .select(&selector)
+                                .map(|element| element.text().collect::<Vec<_>>().join(" "))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                        }
+                        "links" => {
+                            if let Some(attr) = attribute {
+                                if attr != "href" {
+                                    return Err("Links content type requires 'href' attribute".to_string());
+                                }
+                                content = document
+                                    .select(&selector)
+                                    .filter_map(|element| element.value().attr("href"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                            }
+                        }
+                        "images" => {
+                            if let Some(attr) = attribute {
+                                if attr != "src" {
+                                    return Err("Images content type requires 'src' attribute".to_string());
+                                }
+                                content = document
+                                    .select(&selector)
+                                    .filter_map(|element| element.value().attr("src"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                            }
+                        }
+                        _ => return Err("Invalid content type".to_string()),
+                    }
+
+                    // Apply regex filtering
+                    if let Some(regex) = regex {
+                        let matches = regex
+                            .find_iter(&content)
+                            .map(|m| m.as_str().to_string())
+                            .collect::<Vec<_>>();
+                        content = if matches.is_empty() {
+                            return Err(format!("No regex matches found for {}", normalized_url));
+                        } else {
+                            matches.join("\n")
+                        };
+                    }
+
+                    // Extract attributes if not already handled
+                    if let Some(attr) = attribute {
+                        if content_type != "links" && content_type != "images" {
+                            attributes = document
+                                .select(&selector)
+                                .filter_map(|element| element.value().attr(attr))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                        }
+                    }
+
+                    if content.is_empty() && attributes.is_empty() {
+                        return Err(format!("No content or attributes found for {}", normalized_url));
+                    }
+
+                    return Ok(ScrapedData {
+                        url: normalized_url,
+                        content,
+                        attributes,
+                    });
+                }
+                Err(e) => {
+                    last_error = e;
+                    if attempts < max_attempts {
+                        std::thread::sleep(Duration::from_millis(1000));
+                        continue;
+                    }
+                }
+            }
         }
 
-        // Extract attributes
-        let attributes = if let Some(attr) = attribute {
-            document
-                .select(&selector)
-                .filter_map(|element| element.value().attr(attr))
-                .collect::<Vec<_>>()
-                .join("\n")
-        } else {
-            "".to_string()
-        };
-
-        if content.is_empty() && attributes.is_empty() {
-            return Err(format!("No content or attributes found for {}", normalized_url));
-        }
-
-        Ok(ScrapedData {
-            url: normalized_url,
-            content,
-            attributes,
-        })
+        Err(format!("Failed after {} attempts: {}", max_attempts, last_error))
     }
 
     fn save_to_csv(&self, filename: &str) -> Result<(), String> {
@@ -174,6 +259,18 @@ impl ScraperApp {
         Ok(())
     }
 
+    fn save_to_json(&self, filename: &str) -> Result<(), String> {
+        let results = self.results.lock().map_err(|e| format!("Mutex error: {}", e))?;
+        if results.is_empty() {
+            return Err("No data to save".to_string());
+        }
+
+        let json = serde_json::to_string_pretty(&*results)
+            .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+        fs::write(filename, json).map_err(|e| format!("Failed to write JSON file {}: {}", filename, e))?;
+        Ok(())
+    }
+
     fn load_urls_from_file(&self, filename: &str) -> Result<Vec<String>, String> {
         let file = File::open(filename).map_err(|e| format!("Failed to open file {}: {}", filename, e))?;
         let reader = BufReader::new(file);
@@ -188,6 +285,48 @@ impl ScraperApp {
         } else {
             Ok(urls)
         }
+    }
+
+    fn save_config(&self, filename: &str) -> Result<(), String> {
+        let config = ScraperConfig {
+            url_input: self.url_input.clone(),
+            selector_input: self.selector_input.clone(),
+            attribute_input: self.attribute_input.clone(),
+            regex_input: self.regex_input.clone(),
+            timeout_secs: self.timeout_secs,
+            crawl_depth: self.crawl_depth,
+            next_page_selector: self.next_page_selector.clone(),
+            custom_headers: self.custom_headers.clone(),
+            proxy: self.proxy.clone(),
+            max_concurrent: self.max_concurrent,
+            content_type: self.content_type.clone(),
+            retry_attempts: self.retry_attempts,
+            scrape_delay: self.scrape_delay,
+        };
+        let json = serde_json::to_string_pretty(&config)
+            .map_err(|e| format!("Failed to serialize config: {}", e))?;
+        fs::write(filename, json).map_err(|e| format!("Failed to write config file {}: {}", filename, e))?;
+        Ok(())
+    }
+
+    fn load_config(&mut self, filename: &str) -> Result<(), String> {
+        let json = fs::read_to_string(filename).map_err(|e| format!("Failed to read config file {}: {}", filename, e))?;
+        let config: ScraperConfig = serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to deserialize config: {}", e))?;
+        self.url_input = config.url_input;
+        self.selector_input = config.selector_input;
+        self.attribute_input = config.attribute_input;
+        self.regex_input = config.regex_input;
+        self.timeout_secs = config.timeout_secs;
+        self.crawl_depth = config.crawl_depth;
+        self.next_page_selector = config.next_page_selector;
+        self.custom_headers = config.custom_headers;
+        self.proxy = config.proxy;
+        self.max_concurrent = config.max_concurrent;
+        self.content_type = config.content_type;
+        self.retry_attempts = config.retry_attempts;
+        self.scrape_delay = config.scrape_delay;
+        Ok(())
     }
 
     fn parse_headers(&self) -> reqwest::header::HeaderMap {
@@ -208,6 +347,14 @@ impl ScraperApp {
 
 impl App for ScraperApp {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut Frame) {
+        // Apply theme
+        ctx.set_visuals(if self.dark_mode {
+            Visuals::dark()
+        } else {
+            Visuals::light()
+        });
+
+        // Check for status updates
         while let Ok(status) = self.rx.try_recv() {
             self.status = status.clone();
             let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -216,83 +363,157 @@ impl App for ScraperApp {
             ctx.request_repaint();
         }
 
-        CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Website Scraper");
+        // Set global UI style
+        let mut style = ctx.style().as_ref().clone();
+        style.spacing.item_spacing = vec2(10.0, 10.0);
+        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(50, 50, 50);
+        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(80, 80, 80);
+        ctx.set_style(style);
 
-            // URL input
+        // Top panel for theme toggle and config
+        TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Enter URLs (comma-separated): ");
-                ui.text_edit_singleline(&mut self.url_input);
-            });
-
-            // File picker for URLs
-            if ui.button("Load URLs from File").clicked() {
-                if let Some(path) = FileDialog::new()
-                    .add_filter("Text", &["txt"])
-                    .pick_file()
-                {
-                    match self.load_urls_from_file(path.to_str().unwrap_or("")) {
-                        Ok(urls) => {
-                            self.url_input = urls.join(", ");
-                            self.status = format!("Loaded {} URLs from file", urls.len());
-                            self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
-                            println!("Status: {}", self.status);
-                        }
-                        Err(e) => {
-                            self.status = e;
-                            self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
-                            println!("Status: {}", self.status);
-                        }
-                    }
-                    ctx.request_repaint();
+                ui.add(Label::new(RichText::new("Website Scraper").heading().color(Color32::from_rgb(100, 200, 255))));
+                ui.add_space(20.0);
+                if ui.button("Toggle Theme").clicked() {
+                    self.dark_mode = !self.dark_mode;
                 }
-            }
+                if ui.button("Save Config").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_file_name("scraper_config.json")
+                        .save_file()
+                    {
+                        let filename = path.to_str().unwrap_or("scraper_config.json");
+                        match self.save_config(filename) {
+                            Ok(()) => {
+                                self.status = format!("Config saved to {}", filename);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                            Err(e) => {
+                                self.status = format!("Failed to save config: {}", e);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+                if ui.button("Load Config").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                    {
+                        let filename = path.to_str().unwrap_or("");
+                        match self.load_config(filename) {
+                            Ok(()) => {
+                                self.status = format!("Config loaded from {}", filename);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                            Err(e) => {
+                                self.status = format!("Failed to load config: {}", e);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        });
 
-            // Selector input
-            ui.horizontal(|ui| {
-                ui.label("CSS Selector (e.g., p, h1, div.my-class): ");
-                ui.text_edit_singleline(&mut self.selector_input);
+        CentralPanel::default().show(ctx, |ui| {
+            // Input section
+            ui.collapsing("Input Settings", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("URLs (comma-separated): ");
+                    ui.text_edit_singleline(&mut self.url_input)
+                        .on_hover_text("Enter URLs like https://example.com, https://github.com");
+                });
+                if ui.button("Load URLs from File").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("Text", &["txt"])
+                        .pick_file()
+                    {
+                        match self.load_urls_from_file(path.to_str().unwrap_or("")) {
+                            Ok(urls) => {
+                                self.url_input = urls.join(", ");
+                                self.status = format!("Loaded {} URLs from file", urls.len());
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                            Err(e) => {
+                                self.status = e;
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
             });
 
-            // Attribute input
-            ui.horizontal(|ui| {
-                ui.label("HTML Attribute (e.g., href, src, leave blank for none): ");
-                ui.text_edit_singleline(&mut self.attribute_input);
-            });
-
-            // Regex input
-            ui.horizontal(|ui| {
-                ui.label("Regex Filter (e.g., [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}, leave blank for none): ");
-                ui.text_edit_singleline(&mut self.regex_input);
-            });
-
-            // Next page selector
-            ui.horizontal(|ui| {
-                ui.label("Next Page Selector (e.g., a.next, leave blank for none): ");
-                ui.text_edit_singleline(&mut self.next_page_selector);
-            });
-
-            // Crawl depth
-            ui.horizontal(|ui| {
-                ui.label("Crawl Depth (0 = no crawling): ");
-                ui.add(Slider::new(&mut self.crawl_depth, 0.0..=5.0).step_by(1.0));
-            });
-
-            // Custom headers
-            ui.horizontal(|ui| {
-                ui.label("Custom Headers (key:value, one per line, e.g., Cookie: key=value): ");
-                ui.add(TextEdit::multiline(&mut self.custom_headers).desired_rows(3));
-            });
-
-            // Timeout slider
-            ui.horizontal(|ui| {
-                ui.label("Request Timeout (seconds): ");
-                ui.add(Slider::new(&mut self.timeout_secs, 1.0..=30.0).step_by(1.0));
+            // Scraping settings
+            ui.collapsing("Scraping Settings", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("CSS Selector: ");
+                    ui.text_edit_singleline(&mut self.selector_input)
+                        .on_hover_text("e.g., p, h1, div.my-class");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("HTML Attribute: ");
+                    ui.text_edit_singleline(&mut self.attribute_input)
+                        .on_hover_text("e.g., href, src, leave blank for none");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Regex Filter: ");
+                    ui.text_edit_singleline(&mut self.regex_input)
+                        .on_hover_text("e.g., [a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Next Page Selector: ");
+                    ui.text_edit_singleline(&mut self.next_page_selector)
+                        .on_hover_text("e.g., a.next, leave blank for none");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Content Type: ");
+                    ui.text_edit_singleline(&mut self.content_type)
+                        .on_hover_text("text, links, or images");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Crawl Depth: ");
+                    ui.add(Slider::new(&mut self.crawl_depth, 0.0..=5.0).step_by(1.0))
+                        .on_hover_text("0 = no crawling, 1-5 = follow links up to depth");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Custom Headers: ");
+                    ui.add(TextEdit::multiline(&mut self.custom_headers).desired_rows(3))
+                        .on_hover_text("key:value, one per line, e.g., Cookie: key=value");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Proxy (e.g., socks5://user:pass@host:port): ");
+                    ui.text_edit_singleline(&mut self.proxy)
+                        .on_hover_text("Leave blank for no proxy");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max Concurrent Requests: ");
+                    ui.add(Slider::new(&mut self.max_concurrent, 1.0..=10.0).step_by(1.0))
+                        .on_hover_text("Number of simultaneous requests");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Retry Attempts: ");
+                    ui.add(Slider::new(&mut self.retry_attempts, 0.0..=5.0).step_by(1.0))
+                        .on_hover_text("Number of retries for failed requests");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Scrape Delay (seconds): ");
+                    ui.add(Slider::new(&mut self.scrape_delay, 0.0..=5.0).step_by(0.1))
+                        .on_hover_text("Delay between requests to avoid rate-limiting");
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Request Timeout (seconds): ");
+                    ui.add(Slider::new(&mut self.timeout_secs, 1.0..=30.0).step_by(1.0));
+                });
             });
 
             // Action buttons
             ui.horizontal(|ui| {
-                // Scrape button
                 if ui.button("Scrape").clicked() {
                     let urls: Vec<String> = self.url_input
                         .split(',')
@@ -311,9 +532,14 @@ impl App for ScraperApp {
                         Regex::new(&self.regex_input).ok()
                     };
                     let next_page_selector = self.next_page_selector.clone();
+                    let content_type = self.content_type.clone();
                     let depth = self.crawl_depth as u32;
                     let headers = self.parse_headers();
                     let timeout = Duration::from_secs_f32(self.timeout_secs);
+                    let proxy = self.proxy.clone();
+                    let max_concurrent = self.max_concurrent as usize;
+                    let retry_attempts = self.retry_attempts as u32;
+                    let scrape_delay = self.scrape_delay;
                     let use_headless = true;
 
                     if urls.is_empty() {
@@ -327,6 +553,12 @@ impl App for ScraperApp {
                         let progress = Arc::clone(&self.progress);
                         let total_urls = Arc::clone(&self.total_urls);
                         let tx = self.tx.clone();
+
+                        // Set up rayon thread pool
+                        rayon::ThreadPoolBuilder::new()
+                            .num_threads(max_concurrent)
+                            .build_global()
+                            .unwrap();
 
                         // Crawl URLs with depth
                         let mut all_urls = HashSet::new();
@@ -343,12 +575,25 @@ impl App for ScraperApp {
 
                         // Spawn a thread for scraping
                         std::thread::spawn(move || {
-                            let client = Client::builder()
-                                .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                                .timeout(timeout)
-                                .default_headers(headers)
-                                .build()
-                                .expect("Failed to build HTTP client");
+                            let client = if proxy.is_empty() {
+                                Client::builder()
+                                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                                    .timeout(timeout)
+                                    .default_headers(headers)
+                                    .build()
+                                    .expect("Failed to build HTTP client")
+                            } else {
+                                let proxy = reqwest::Proxy::all(&proxy)
+                                    .map_err(|e| format!("Invalid proxy {}: {}", proxy, e))
+                                    .expect("Failed to set proxy");
+                                Client::builder()
+                                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                                    .timeout(timeout)
+                                    .default_headers(headers)
+                                    .proxy(proxy)
+                                    .build()
+                                    .expect("Failed to build HTTP client")
+                            };
 
                             let mut scraped_results = Vec::new();
                             let mut processed = 0;
@@ -359,7 +604,7 @@ impl App for ScraperApp {
                                 }
 
                                 // Scrape current URL
-                                match Self::scrape_url(&current_url, &client, &selector, &attribute, &regex, use_headless) {
+                                match Self::scrape_url(&current_url, &client, &selector, &attribute, &regex, use_headless, &content_type, retry_attempts) {
                                     Ok(data) => {
                                         scraped_results.push(data);
                                         let msg = format!("Scraped {}", current_url);
@@ -378,6 +623,11 @@ impl App for ScraperApp {
                                 // Update progress
                                 processed += 1;
                                 *progress.lock().unwrap() = processed as f32 / *total_urls.lock().unwrap() as f32;
+
+                                // Apply scrape delay
+                                if scrape_delay > 0.0 {
+                                    std::thread::sleep(Duration::from_secs_f32(scrape_delay));
+                                }
 
                                 // Follow next page or crawl links
                                 if !next_page_selector.is_empty() || current_depth < depth {
@@ -428,7 +678,6 @@ impl App for ScraperApp {
                     }
                 }
 
-                // Clear results button
                 if ui.button("Clear Results").clicked() {
                     self.results.lock().unwrap().clear();
                     self.log.lock().unwrap().clear();
@@ -439,7 +688,6 @@ impl App for ScraperApp {
                     ctx.request_repaint();
                 }
 
-                // Save to CSV button
                 if ui.button("Save to CSV").clicked() {
                     if let Some(path) = FileDialog::new()
                         .add_filter("CSV", &["csv"])
@@ -462,32 +710,69 @@ impl App for ScraperApp {
                         ctx.request_repaint();
                     }
                 }
+
+                if ui.button("Save to JSON").clicked() {
+                    if let Some(path) = FileDialog::new()
+                        .add_filter("JSON", &["json"])
+                        .set_file_name("scraped_data.json")
+                        .save_file()
+                    {
+                        let filename = path.to_str().unwrap_or("scraped_data.json");
+                        match self.save_to_json(filename) {
+                            Ok(()) => {
+                                self.status = format!("Saved to {}", filename);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                                println!("Status: {}", self.status);
+                            }
+                            Err(e) => {
+                                self.status = format!("Failed to save: {}", e);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                                println!("Status: {}", self.status);
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                }
             });
 
-            // Display status
-            ui.label(&self.status);
+            // Status with indicator
+            ui.horizontal(|ui| {
+                if self.status.contains("Scraping...") {
+                    ui.spinner();
+                }
+                ui.label(RichText::new(&self.status).color(
+                    if self.status.contains("Error") {
+                        Color32::RED
+                    } else if self.status.contains("Scraped") || self.status.contains("Saved") || self.status.contains("Loaded") {
+                        Color32::GREEN
+                    } else {
+                        Color32::WHITE
+                    }
+                ));
+            });
 
             // Progress bar
             let progress = *self.progress.lock().unwrap();
             if progress > 0.0 && progress < 1.0 {
-                ui.add(egui::ProgressBar::new(progress).show_percentage());
+                ui.add(ProgressBar::new(progress).show_percentage());
             }
 
-            // Display results
-            ui.label("Results:");
-            ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
-                let results = self.results.lock().unwrap();
-                for data in results.iter() {
-                    ui.label(format!("URL: {}", data.url));
-                    ui.label(format!("Content: {}", data.content));
-                    if !data.attributes.is_empty() {
-                        ui.label(format!("Attributes: {}", data.attributes));
+            // Results
+            ui.collapsing("Results", |ui| {
+                ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                    let results = self.results.lock().unwrap();
+                    for data in results.iter() {
+                        ui.label(format!("URL: {}", data.url));
+                        ui.label(format!("Content: {}", data.content));
+                        if !data.attributes.is_empty() {
+                            ui.label(format!("Attributes: {}", data.attributes));
+                        }
+                        ui.separator();
                     }
-                    ui.separator();
-                }
+                });
             });
 
-            // Error log window
+            // Error log
             ui.collapsing("Error Log", |ui| {
                 ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                     let log = self.log.lock().unwrap();

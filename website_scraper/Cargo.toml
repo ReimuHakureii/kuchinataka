@@ -4,12 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["gzip", "blocking"]}
+reqwest = { version = "0.11", features = ["gzip", "blocking", "socks"]}
 eframe = "0.22"
 egui = "0.22"
 scraper = "0.13"
 url = "2.4"
 serde = { version = "1.0", features = ["derive"]}
+serde_json = "1.0"
 csv = "1.1"
 rayon = "1.7"
 crossbeam-channel = "0.5"
