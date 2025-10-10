@@ -67,10 +67,17 @@ struct ScraperApp {
     tx: Sender<String>,
     rx: Receiver<String>,
     dark_mode: bool,
+    last_max_concurrent: f32, // New: Track last configured thread count
 }
 
 impl ScraperApp {
     fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Initialize Rayon thread pool once
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4) // Default to 4 threads
+            .build_global()
+            .unwrap_or_else(|e| eprintln!("Failed to initialize thread pool: {}", e));
+
         let (tx, rx) = bounded(100);
         Self {
             url_input: String::new(),
@@ -94,6 +101,7 @@ impl ScraperApp {
             tx,
             rx,
             dark_mode: true,
+            last_max_concurrent: 4.0, // Initialize to match default max_concurrent
         }
     }
 
@@ -515,6 +523,19 @@ impl App for ScraperApp {
             // Action buttons
             ui.horizontal(|ui| {
                 if ui.button("Scrape").clicked() {
+                    // Update thread pool if max_concurrent changed
+                    if (self.max_concurrent - self.last_max_concurrent).abs() > f32::EPSILON {
+                        rayon::ThreadPoolBuilder::new()
+                            .num_threads(self.max_concurrent as usize)
+                            .build_global()
+                            .unwrap_or_else(|e| {
+                                self.status = format!("Failed to update thread pool: {}", e);
+                                self.log.lock().unwrap().push(format!("[{}] {}", Local::now().format("%Y-%m-%d %H:%M:%S"), self.status));
+                                println!("Status: {}", self.status);
+                            });
+                        self.last_max_concurrent = self.max_concurrent;
+                    }
+
                     let urls: Vec<String> = self.url_input
                         .split(',')
                         .map(|s| s.trim().to_string())
@@ -554,25 +575,6 @@ impl App for ScraperApp {
                         let total_urls = Arc::clone(&self.total_urls);
                         let tx = self.tx.clone();
 
-                        // Set up rayon thread pool
-                        rayon::ThreadPoolBuilder::new()
-                            .num_threads(max_concurrent)
-                            .build_global()
-                            .unwrap();
-
-                        // Crawl URLs with depth
-                        let mut all_urls = HashSet::new();
-                        let mut queue = VecDeque::new();
-                        for url in urls {
-                            let normalized = Self::normalize_url(&url);
-                            all_urls.insert(normalized.clone());
-                            queue.push_back((normalized, 0));
-                        }
-                        *total_urls.lock().unwrap() = all_urls.len().min(100);
-                        *progress.lock().unwrap() = 0.0;
-                        tx.send("Scraping...".to_string()).unwrap();
-                        ctx.request_repaint();
-
                         // Spawn a thread for scraping
                         std::thread::spawn(move || {
                             let client = if proxy.is_empty() {
@@ -597,6 +599,17 @@ impl App for ScraperApp {
 
                             let mut scraped_results = Vec::new();
                             let mut processed = 0;
+
+                            let mut all_urls = HashSet::new();
+                            let mut queue = VecDeque::new();
+                            for url in urls {
+                                let normalized = Self::normalize_url(&url);
+                                all_urls.insert(normalized.clone());
+                                queue.push_back((normalized, 0));
+                            }
+                            *total_urls.lock().unwrap() = all_urls.len().min(100);
+                            *progress.lock().unwrap() = 0.0;
+                            tx.send("Scraping...".to_string()).unwrap();
 
                             while let Some((current_url, current_depth)) = queue.pop_front() {
                                 if current_depth > depth || all_urls.len() >= 100 {
