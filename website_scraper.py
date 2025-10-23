@@ -375,4 +375,40 @@ class ScraperApp:
                 json.dump(config, f, indent=2)
             self.status_queue.put(f"Failed to save to {filename}")
         except Exception as e:
-            
+            self.status_queue.put(f"Failed to load config: {str(e)}")
+    
+    def parse_headers(self):
+        headers = {}
+        for line in self.custom_headers.get("1.0", tk.END).strip().split("\n"):
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                headers[parts[0].strip()] = parts[1].strip()
+        return headers
+    
+    def update_status(self):
+        while self.running:
+            try:
+                status = self.status_queue.get_nowait()
+                self.status_label.config(text=status)
+                timestamp = datetime.now().strftime("%Y-%m-%d %H: %M: %S")
+                self.log.append(f"[{timestamp}] {status}")
+                self.log_text.delete("1.0", tk.END)
+                self.log_text.insert("1.0", "\n".join(self.log))
+                self.logger.info(status)
+                self.update_results()
+                if "Error" in status:
+                    self.status_label.config(foreground="red")
+                elif "Scraped" in status or "Saved" in status or "Loaded" in status:
+                    self.status_label.config(foreground="green")
+                else:
+                    self.status_label.config(foreground="black" if self.dark_mode else "black")
+            except Empty:
+                pass
+            self.progress_bar("value") = self.progress.value
+            self.root.update()
+            time.sleep(0.1)
+    
+    def update_results(self):
+        self.results_text.delete("1.0", tk.END)
+        for data in self.results:
+            self.results_text.insert()
