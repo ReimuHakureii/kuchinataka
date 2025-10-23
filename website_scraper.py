@@ -339,4 +339,40 @@ class ScraperApp:
         filename = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
         if not filename:
             return
-        
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                urls = [line.strip() for line in f if line.strip()]
+            if not urls:
+                self.status_queue.put("No valid URLS found in file")
+                return
+            self.url_input.delete(0, tk.END)
+            self.url_input.insert(0, ", ".join(urls))
+            self.status_queue.put(f"Loaded {len(urls)} URLS from file")
+        except Exception as e:
+            self.status_queue.put(f"Failed to load URLS: {str(e)}")
+    
+    def save_config(self):
+        filename = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if not filename:
+            return
+        config = {
+            "url_input": self.url_input.get(),
+            "selector_input": self.selector_input.get(),
+            "regex_input": self.regex_input.get(),
+            "timeout_secs": self.timeout_secs.get(),
+            "crawl_depth": self.crawl_depth.get(),
+            "next_page_selector": self.next_page_selector.get(),
+            "custom_headers": self.custom_headers.get("1.0", tk.END).strip(),
+            "proxy": self.proxy.get(),
+            "max_concurrent": self.max_concurrent.get(),
+            "content_type": self.content_type_var.get(),
+            "retry_attempts": self.retry_attempts.get(),
+            "scrape_delay": self.scrape_delay.get(),
+            "use_headless": self.use_headless.get(),
+        }
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2)
+            self.status_queue.put(f"Failed to save to {filename}")
+        except Exception as e:
+            
