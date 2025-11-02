@@ -411,4 +411,106 @@ class ScraperApp:
     def update_results(self):
         self.results_text.delete("1.0", tk.END)
         for data in self.results:
-            self.results_text.insert()
+            self.results_text.insert(tk.END, f"URL: {data.url}\n")
+            self.results_text.insert(tk.END, f"Content: {data.content}\n")
+            if data.attributes:
+                self.results_text.insert(tk.END, f"Attributes: {data.attributes}\n")
+            self.results_text.insert(tk.END, "-" * 50 + "\n")
+
+    def scrape(self):
+        urls = [url.strip() for url in self.url_input.get().split(",") if url.strip()]
+        if not urls:
+            self.status_queue.put("No valid URLs provided")
+            return
+
+        if self.max_concurrent.get() != self.last_max_concurrent:
+            self.last_max_concurrent = self.max_concurrent.get()
+
+        selector = self.selector_input.get()
+        attribute = self.attribute_input.get()
+        regex = re.compile(self.regex_input.get())
+        next_page_selector = self.next_page_selector.get()
+        content_type = self.content_type_var.get()
+        depth = int(self.crawl_depth.get())
+        headers = self.parse_headers()
+        timeout = self.timeout_secs.get()
+        proxy = self.proxy.get()
+        scrape_delay = self.scrape_delay.get()
+        use_headless = self.use_headless.get()
+        retry_attempts = int(self.retry_attempts.get())
+
+        self.results[:] = []
+        self.log[:] = []
+        self.progress.value = 0.0
+        self.total_urls.value = 0
+        self.status_queue.put("Scraping...")
+
+        def scrape_worker():
+            all_urls = set()
+            queue = [(self.normalize_url(url), 0) for url in urls]
+            seen_content = set()
+            scraped_results = []
+
+            self.total_urls.value = min(len(queue), 100)
+
+            with Pool(processes=int(self.max_concurrent.get())) as pool:
+                while queue:
+                    current_url, current_depth = queue.pop(0)
+                    if current_depth > depth or len(all_urls) >= 100:
+                        continue
+
+                    all_urls.add(current_url)
+                    args = (current_url, selector, attribute, regex, use_headless, content_type, timeout, proxy, retry_attempts, self.status_queue)
+                    result = pool.apply(self.scrape_url, (args,))
+                    if result:
+                        if result.content not in seen_content:
+                            scraped_results.append(result)
+                            seen_content.add(result.content)
+
+                    self.progress.value = len(scraped_results) / self.total_urls.value
+
+                    if scrape_delay > 0:
+                        time.sleep(scrape_delay)
+                    
+                    if next_page_selector or current_depth < depth:
+                        try:
+                            response = requests.get(current_url, headers=headers, timeout=timeout, proxies={"http": proxy, "https": proxy} if proxy else None)
+                            soup = BeautifulSoup(response.text, "html_parser")
+                            link_selector = next_page_selector or "a"
+                            for element in soup.select(link_selector):
+                                href = element.get("href")
+                                if href:
+                                    absolute_url = urljoin(current_url, href)
+                                    if absolute_url not in all_urls and current_depth < depth:
+                                        all_urls.add(absolute_url)
+                                        queue.append((absolute_url, current_depth + 1))
+                                        self.total_urls.value = min(len(all_urls), 100)
+                        except Exception as e:
+                            self.status_queue.put(f"Error crawling links from {current_url}: {str(e)}")
+
+            self.results.extend(scraped_results)
+            self.status_queue.put("Scraping completed" if scraped_results else "No successful results")
+        
+        threading.Thread(target=scrape_worker, daemon=True).start()
+
+    def clear_results(self):
+        self.results[:] = []
+        self.log[:] = []
+        self.progress.value = 0.0
+        self.total_urls.value = 0
+        self.status_queue.put("Results cleared")
+        self.results_text.delete("1.0", tk.END)
+        self.log_text.delete("1.0", tk.END)
+
+    def destroy(self):
+        self.running = False
+        self.status_thread.join()
+        self.root.destroy()
+
+def main():
+    root = tk.Tk()
+    app = ScraperApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()   
