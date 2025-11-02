@@ -404,7 +404,7 @@ class ScraperApp:
                     self.status_label.config(foreground="black" if self.dark_mode else "black")
             except Empty:
                 pass
-            self.progress_bar("value") = self.progress.value
+            self.progress_bar["value"] = self.progress.value
             self.root.update()
             time.sleep(0.1)
     
