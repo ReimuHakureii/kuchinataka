@@ -376,6 +376,48 @@ class ScraperApp:
             self.status_queue.put(f"Failed to save to {filename}")
         except Exception as e:
             self.status_queue.put(f"Failed to load config: {str(e)}")
+
+    def load_config(self):
+        filename = filedialog.askopenfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
+        if not filename:
+            return
+        
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+
+            self.url_input.delete(0, tk.END)
+            self.url_input.insert(0, cfg.get("url_input", ""))
+
+            self.selector_input.delete(0, tk.END)
+            self.selector_input.insert(0, cfg.get("selector_input", "p,h1,h2,h3"))
+
+            self.attribute_input.delete(0, tk.END)
+            self.attribute_input.insert(0, cfg.get("attribute_input", ""))
+
+            self.regex_input.delete(0, tk.END)
+            self.regex_input.insert(0, cfg.get("regex_input", ""))
+
+            self.next_page_selector.delete(1.0, tk.END)
+            self.next_page_selector.insert(1.0, cfg.get("next_page_selector", ""))
+
+            self.proxy.delete(0, tk.END)
+            self.proxy.insert(cfg.get("proxy", ""))
+
+            self.timeout_secs.set(cfg.get("timeout_secs", 10.0))
+            self.crawl_depth.set(cfg.get("crawl_depth", 1))
+            self.max_concurrent.set(cfg.get("max_concurrent", 4))
+            self.retry_attempts.set(cfg.get("retry_attempts", 2))
+            self.scrape_delay.set(cfg.get("scrape_delay", 1.0))
+            self.use_headless.set(cfg.get("use_headless", True))
+
+            self.content_type_var.set(cfg.get("content_type", "text"))
+
+            self.update_content_type()
+
+            self.status_queue.put(f"Config loaded from {filename}")
+        except Exception as e:
+            self.status_queue.put(f"Failed to load config: {e}")
     
     def parse_headers(self):
         headers = {}
