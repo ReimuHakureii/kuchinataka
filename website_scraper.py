@@ -154,20 +154,40 @@ class ScraperApp:
         self.max_concurrent = tk.DoubleVar(value=self.config.max_concurrent)
         ttk.Scale(self.scrape_frame, from_=1, to=10, orient="horizontal", variable=self.max_concurrent).grid(row=8, column=1, sticky="ew", padx=5)
 
+        self.max_concurrent_lbl = ttk.Label(self.scrape_frame, text=f"{self.max_concurrent.get():.0f}")
+        self.max_concurrent_lbl.grid(row=8, column=2, sticky="w", padx=(2, 10))
+        self.max_concurrent.trace("w", lambda *_, v=self.max_concurrent, lbl=self.max_concurrent_lbl:
+                                  lbl.config(text=f"{v.get():.0f}"))
+
         # Retry Attempts
         ttk.Label(self.scrape_frame, text="Retry Attempts:").grid(row=9, column=0, sticky="w")
         self.retry_attempts = tk.DoubleVar(value=self.config.retry_attempts)
         ttk.Scale(self.scrape_frame, from_=0, to=5, orient="horizontal", variable=self.retry_attempts).grid(row=9, column=1, sticky="ew", padx=5)
+
+        self.retry_attempts_lbl = ttk.Label(self.scrape_frame, text=f"{self.retry_attempts.get():.0f}")
+        self.retry_attempts_lbl.grid(row=9, column=2, sticky="w", padx=(2, 10))
+        self.retry_attempts.trace("w", lambda *_, v=self.retry_attempts, lbl=self.retry_attempts_lbl:
+                                  lbl.config(text=f"{v.get():.0f}"))
 
         # Scrape Delay
         ttk.Label(self.scrape_frame, text="Scrape Delay (seconds):").grid(row=10, column=0, sticky="w")
         self.scrape_delay = tk.DoubleVar(value=self.config.scrape_delay)
         ttk.Scale(self.scrape_frame, from_=0, to=5, orient="horizontal", variable=self.scrape_delay).grid(row=10, column=1, sticky="ew", padx=5)
 
+        self.scrape_delay_lbl = ttk.Label(self.scrape_frame, text=f"{self.scrape_delay.get():.0f}")
+        self.scrape_delay_lbl.grid(row=10, column=2, sticky="w", padx=(2, 10))
+        self.scrape_delay.trace("w", lambda *_, v=self.scrape_delay, lbl=self.scrape_delay_lbl:
+                                lbl.config(text=f"{v.get():.1f}"))
+
         # Request Timeout
         ttk.Label(self.scrape_frame, text="Request Timeout (seconds):").grid(row=11, column=0, sticky="w")
         self.timeout_secs = tk.DoubleVar(value=self.config.timeout_secs)
         ttk.Scale(self.scrape_frame, from_=1, to=30, orient="horizontal", variable=self.timeout_secs).grid(row=11, column=1, sticky="ew", padx=5)
+
+        self.timeout_secs_lbl = ttk.Label(self.scrape_frame, text=f"{self.timeout_secs.get():.0f}")
+        self.timeout_secs_lbl.grid(row=11, column=2, sticky="w", padx=(2, 10))
+        self.timeout_secs.trace("w", lambda *_, v=self.timeout_secs, lbl=self.timeout_secs_lbl:
+                                lbl.config(text=f"{v.get():.0f}"))
 
         # Headless Browser
         ttk.Label(self.scrape_frame, text="Use Headless Browser:").grid(row=12, column=0, sticky="w")
