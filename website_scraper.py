@@ -138,6 +138,12 @@ class ScraperApp:
         self.crawl_depth = tk.DoubleVar(value=self.config.crawl_depth)
         ttk.Scale(self.scrape_frame, from_=0, to=5, orient="horizontal", variable=self.crawl_depth).grid(row=5, column=1, sticky="ew", padx=5)
 
+        self.crawl_depth_lbl = ttk.Label(self.scrape_frame, text=f"{int(self.crawl_depth.get())}")
+        self.crawl_depth_lbl.grid(row=5, column=2, sticky="w", padx=(2, 10))
+        self.crawl_depth.trace("w", lambda *_, v=self.crawl_depth, lbl=self.crawl_depth_lbl:
+                               lbl.config(text=f"{int(v.get())}"))
+
+
         # Custom Headers
         ttk.Label(self.scrape_frame, text="Custom Headers:").grid(row=6, column=0, sticky="w")
         self.custom_headers = tk.Text(self.scrape_frame, height=3, width=50)
