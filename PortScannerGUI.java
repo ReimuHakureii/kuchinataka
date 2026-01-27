@@ -121,7 +121,23 @@ public class PortScannerGUI extends JFrame {
         endPortField = new JTextField("1000");
         inputPanel.add(endPortField, gbc);
 
+        gbc.gridx = 0; gbc.gridy = 2; gbc.weightx = 0;
+        inputPanel.add(new JLabel("Timeout (ms):"), gbc);
+        gbc.gridx = 1;
+        timeoutSpinner = new JSpinner(new SpinnerNumberModel(1000, 100, 10000, 100));
+        inputPanel.add(timeoutSpinner, gbc);
         
+        gbc.gridx = 2;
+        inputPanel.add(new JLabel("Threads:"), gbc);
+        gbc.gridx = 3;
+        threadSpinner = new JSpinner(new SpinnerNumberModel(50, 1, 500, 10));
+        inputPanel.add(threadSpinner, gbc);
+
+        gbc.gridx = 0; gbc.gridy = 3;
+        inputPanel.add(new JLabel("Scan Mode:"), gbc);
+        gbc.gridx = 1; gbc.gridwidth = 3;
+        scanModeCombo = new JComboBox<>(ScanMode.values());
+        inputPanel.add(scanModeCombo, gbc);
     }
 }
 
