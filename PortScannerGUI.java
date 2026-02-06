@@ -404,9 +404,55 @@ public class PortScannerGUI extends JFrame {
                 progressBar.setValue(scannedPorts);
 
                 if (result.isOpen) {
-                    
+                    openPorts++;
+                    String service = COMMON_SERVICES.getOrDefault(result.port, "Unknown");
+                    tableModel.addRow(new Object[]{result.port, result.state, service, result.responseTime});
+                    log("Port " + result.port + " is OPEN (" + service + ")");
+                } else if (!result.state.equals("Skipped")) {
+                    closedPorts++;
                 }
+
+                statsLabel.setText("Open: " + openPorts + " | Closed: " + closedPorts + " | Total: " + scannedPorts);
+                statusLabel.setText("Scanning port " + result.port + "...");
             }
         }
+
+        @Override
+        protected void done() {
+            isScanning = false;
+            scanButton.setEnabled(true);
+            stopButton.setEnabled(false);
+
+            if (isCancelled()) {
+                statusLabel.setText("Scan cancelled");
+            } else {
+                statusLabel.setText("Scan compledted - Found " + openPorts + " open ports");
+                log("Scan completed. Open ports: " + openPorts + ", Closed Ports: " + closedPorts);
+            }
+        }
+    }
+
+    private static class PortResult {
+        int port;
+        boolean isOpen;
+        String state;
+        long responseTime;
+
+        PortResult(int port, boolean isOpen, String state, long responseTime) {
+            this.port = port;
+            this.isOpen = isOpen;
+            this.state = state;
+            this.responseTime = responseTime;
+        }
+    }
+
+    public static void main(String[] args) {
+        try {
+            UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+
+        SwingUtilities.invokeLater(() -> new PortScannerGUI());
     }
 }
