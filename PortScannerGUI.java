@@ -345,6 +345,7 @@ public class PortScannerGUI extends JFrame {
             this.startPort = startPort;
             this.endPort = endPort;
             this.timeout = timeout;
+            this.threadCount = threadCount;
             this.mode = mode;
             this.executor = Executors.newFixedThreadPool(threadCount); 
         }
